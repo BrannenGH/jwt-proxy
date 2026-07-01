@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
+import asyncio
 import contextlib
+import logging
 import os
 import time
 from collections.abc import Mapping
 from typing import Any
 
 import jwt
-from aiohttp import ClientConnectionError, ClientPayloadError, ClientSession, web
+from aiohttp import (
+    ClientConnectionError,
+    ClientError,
+    ClientPayloadError,
+    ClientSession,
+    web,
+)
 from jwt import PyJWKClient
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("jwt_proxy")
 
 
 HOP_BY_HOP_HEADERS = {
@@ -42,8 +53,9 @@ JWT_ALGORITHMS = [
     for algorithm in os.environ.get("JWT_ALGORITHMS", "RS256").split(",")
     if algorithm.strip()
 ]
+OIDC_JWKS_TIMEOUT = float(os.environ.get("OIDC_JWKS_TIMEOUT", "5"))
 
-jwks_client = PyJWKClient(JWKS_URL)
+jwks_client = PyJWKClient(JWKS_URL, timeout=OIDC_JWKS_TIMEOUT)
 
 
 def filter_headers(headers: Mapping[str, str]) -> dict[str, str]:
@@ -62,7 +74,7 @@ def unauthorized(message: str) -> web.Response:
     )
 
 
-def validate_bearer_token(request: web.Request) -> dict[str, Any]:
+async def validate_bearer_token(request: web.Request) -> dict[str, Any]:
     authorization = request.headers.get("Authorization", "")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:
@@ -72,7 +84,9 @@ def validate_bearer_token(request: web.Request) -> dict[str, Any]:
             headers={"WWW-Authenticate": 'Bearer realm="mcp"'},
         )
 
-    signing_key = jwks_client.get_signing_key_from_jwt(token)
+    signing_key = await asyncio.get_running_loop().run_in_executor(
+        None, jwks_client.get_signing_key_from_jwt, token
+    )
     options = {"verify_aud": JWT_AUDIENCE is not None}
     claims = jwt.decode(
         token,
@@ -169,7 +183,7 @@ async def authorization_server_metadata(request: web.Request) -> web.Response:
 
 async def proxy(request: web.Request) -> web.StreamResponse:
     try:
-        claims = validate_bearer_token(request)
+        claims = await validate_bearer_token(request)
     except web.HTTPException as error:
         if error.status == 401:
             error.headers.update(unauthorized_headers(request))
@@ -178,6 +192,15 @@ async def proxy(request: web.Request) -> web.StreamResponse:
         response = unauthorized(str(error))
         response.headers.update(unauthorized_headers(request))
         return response
+    except Exception:
+        logger.exception("token validation failed (JWKS/network error)")
+        return web.json_response(
+            {
+                "error": "auth_server_unavailable",
+                "message": "could not reach or query the identity provider",
+            },
+            status=503,
+        )
 
     rel_url = request.rel_url
     if request.path == "/":
@@ -209,7 +232,14 @@ async def proxy(request: web.Request) -> web.StreamResponse:
                 await response.write(chunk)
             await response.write_eof()
             return response
-    except (ClientConnectionError, ClientPayloadError, ConnectionResetError):
+    except (
+        ClientConnectionError,
+        ClientPayloadError,
+        ConnectionResetError,
+        ClientError,
+        TimeoutError,
+    ) as error:
+        logger.warning("upstream request failed: %s", error)
         if response is not None:
             with contextlib.suppress(Exception):
                 await response.write_eof()

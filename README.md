@@ -42,3 +42,11 @@ docker run -p 8080:8080 \
 ```
 
 Health check available at `GET /healthz`.
+
+## Container image
+
+There exists a container image as well:
+
+```bash
+docker pull ghcr.io/brannengh/jwt-proxy:latest
+```
