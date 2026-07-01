@@ -13,9 +13,11 @@ from aiohttp import (
     ClientError,
     ClientPayloadError,
     ClientSession,
+    ClientTimeout,
     web,
 )
 from jwt import PyJWKClient
+from jwt.exceptions import PyJWKClientError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("jwt_proxy")
@@ -42,6 +44,10 @@ def required_env(name: str) -> str:
 
 ISSUER_URL = required_env("OIDC_ISSUER_URL").rstrip("/")
 JWKS_URL = os.environ.get("OIDC_JWKS_URL", f"{ISSUER_URL}/protocol/openid-connect/certs")
+# Lets the discovery-document fetch target an internal address (e.g. to avoid NAT
+# hairpinning back through the public issuer hostname) while ISSUER_URL, used for
+# `iss` claim validation, stays the externally-visible issuer.
+METADATA_URL = os.environ.get("OIDC_METADATA_URL", f"{ISSUER_URL}/.well-known/openid-configuration")
 UPSTREAM_URL = required_env("MCP_UPSTREAM_URL").rstrip("/")
 UPSTREAM_MCP_PATH = os.environ.get("MCP_UPSTREAM_MCP_PATH", "/mcp").strip() or "/mcp"
 PUBLIC_URL = os.environ.get("MCP_PUBLIC_URL", "").strip().rstrip("/")
@@ -161,14 +167,25 @@ async def protected_resource_metadata(request: web.Request) -> web.Response:
 
 
 async def authorization_server_metadata(request: web.Request) -> web.Response:
-    metadata_url_ = f"{ISSUER_URL}/.well-known/openid-configuration"
-    async with request.app["client"].get(metadata_url_) as response:
-        if response.status < 200 or response.status >= 300:
-            return web.json_response(
-                {"error": "authorization_server_metadata_failed", "status": response.status},
-                status=502,
-            )
-        metadata = await response.json()
+    try:
+        async with request.app["client"].get(
+            METADATA_URL, timeout=ClientTimeout(total=OIDC_JWKS_TIMEOUT + 5)
+        ) as response:
+            if response.status < 200 or response.status >= 300:
+                return web.json_response(
+                    {"error": "authorization_server_metadata_failed", "status": response.status},
+                    status=502,
+                )
+            metadata = await response.json()
+    except (ClientError, TimeoutError, asyncio.TimeoutError) as error:
+        logger.warning("authorization server metadata fetch failed: %s", error)
+        return web.json_response(
+            {
+                "error": "auth_server_unavailable",
+                "message": "could not reach or query the identity provider",
+            },
+            status=503,
+        )
 
     metadata["token_endpoint_auth_methods_supported"] = include_value(
         metadata.get("token_endpoint_auth_methods_supported"),
@@ -188,6 +205,19 @@ async def proxy(request: web.Request) -> web.StreamResponse:
         if error.status == 401:
             error.headers.update(unauthorized_headers(request))
         raise
+    except PyJWKClientError as error:
+        # Raised when the JWKS endpoint can't be reached/parsed, not when the
+        # token itself is bad. PyJWKClientError subclasses PyJWTError, so this
+        # must be caught ahead of the generic PyJWTError branch below or every
+        # transient JWKS hiccup gets misreported to the client as 401.
+        logger.warning("JWKS fetch failed: %s", error)
+        return web.json_response(
+            {
+                "error": "auth_server_unavailable",
+                "message": "could not reach or query the identity provider",
+            },
+            status=503,
+        )
     except jwt.PyJWTError as error:
         response = unauthorized(str(error))
         response.headers.update(unauthorized_headers(request))
