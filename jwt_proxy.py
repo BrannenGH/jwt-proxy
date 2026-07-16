@@ -54,6 +54,7 @@ PUBLIC_URL = os.environ.get("MCP_PUBLIC_URL", "").strip().rstrip("/")
 RESOURCE_URL = os.environ.get("MCP_RESOURCE_URL", "").strip().rstrip("/")
 JWT_AUDIENCE = os.environ.get("JWT_AUDIENCE", "").strip() or None
 JWT_REQUIRED_AZP = os.environ.get("JWT_REQUIRED_AZP", "").strip() or None
+MCP_UPSTREAM_AUTH_TOKEN = os.environ.get("MCP_UPSTREAM_AUTH_TOKEN", "").strip() or None
 JWT_ALGORITHMS = [
     algorithm.strip()
     for algorithm in os.environ.get("JWT_ALGORITHMS", "RS256").split(",")
@@ -238,6 +239,8 @@ async def proxy(request: web.Request) -> web.StreamResponse:
     target_url = f"{UPSTREAM_URL}{rel_url}"
     headers = filter_headers(request.headers)
     headers.pop("Authorization", None)
+    if MCP_UPSTREAM_AUTH_TOKEN:
+        headers["Authorization"] = f"Bearer {MCP_UPSTREAM_AUTH_TOKEN}"
     headers["X-Authenticated-Subject"] = str(claims.get("sub", ""))
     if claims.get("preferred_username"):
         headers["X-Authenticated-User"] = str(claims["preferred_username"])

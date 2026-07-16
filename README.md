@@ -16,6 +16,7 @@ so MCP clients can discover the auth flow.
 | `MCP_UPSTREAM_MCP_PATH` | no | Upstream path for MCP requests (default: `/mcp`). |
 | `MCP_PUBLIC_URL` | no | Public base URL to advertise in metadata (default: inferred from request). |
 | `MCP_RESOURCE_URL` | no | Public resource URL to advertise (default: `{MCP_PUBLIC_URL}{MCP_UPSTREAM_MCP_PATH}`). |
+| `MCP_UPSTREAM_AUTH_TOKEN` | no | If set, sent upstream as `Authorization: Bearer {token}` instead of stripping the client's Authorization header. |
 | `JWT_AUDIENCE` | no | Expected `aud` claim; if unset, audience is not verified. |
 | `JWT_REQUIRED_AZP` | no | Expected `azp` claim; if unset, not checked. |
 | `JWT_ALGORITHMS` | no | Comma-separated list of accepted signing algorithms (default: `RS256`). |
