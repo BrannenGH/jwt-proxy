@@ -199,6 +199,40 @@ async def authorization_server_metadata(request: web.Request) -> web.Response:
     return web.json_response(metadata)
 
 
+async def whoami(request: web.Request) -> web.Response:
+    try:
+        claims = await validate_bearer_token(request)
+    except web.HTTPException as error:
+        if error.status == 401:
+            error.headers.update(unauthorized_headers(request))
+        raise
+    except PyJWKClientError as error:
+        logger.warning("JWKS fetch failed: %s", error)
+        return web.json_response(
+            {
+                "error": "auth_server_unavailable",
+                "message": "could not reach or query the identity provider",
+            },
+            status=503,
+        )
+    except jwt.PyJWTError as error:
+        response = unauthorized(str(error))
+        response.headers.update(unauthorized_headers(request))
+        return response
+    except Exception:
+        logger.exception("token validation failed (JWKS/network error)")
+        return web.json_response(
+            {
+                "error": "auth_server_unavailable",
+                "message": "could not reach or query the identity provider",
+            },
+            status=503,
+        )
+
+    _, _, token = request.headers.get("Authorization", "").partition(" ")
+    return web.json_response({"token": token, "sub": claims.get("sub"), "exp": claims.get("exp")})
+
+
 async def proxy(request: web.Request) -> web.StreamResponse:
     try:
         claims = await validate_bearer_token(request)
@@ -300,6 +334,7 @@ async def create_app() -> web.Application:
         "/.well-known/openid-configuration",
         authorization_server_metadata,
     )
+    app.router.add_get("/_whoami", whoami)
     app.router.add_route("*", "/{path:.*}", proxy)
     app["client"] = ClientSession()
 
